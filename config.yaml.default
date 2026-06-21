@@ -1,0 +1,51 @@
+# ======================================================================
+#  ablocker — Xray abuse blocker (torrents + malware/botnet)
+#  Форк tblocker: банит торрент-абузеров И устройства с малварью/ботнетом.
+# ======================================================================
+
+# Путь к access.log ноды Xray/Remnawave.
+LogFile: "/var/log/remnanode/access.log"
+
+# --- Торрент-блокировка (как в tblocker) ---
+# Требует включённого bittorrent-сниффинга в Xray и роутинга тега в blackhole.
+TorrentTag: "TORRENT"
+BlockDuration: 10           # минут — короткий бан за торрент
+
+# iptables | nft
+BlockMode: "iptables"
+
+# ======================================================================
+#  Malware / botnet блокировка (Vo1d / BadBox и т.п.)
+#  Ловим юзеров, чьи устройства стучатся на известные C2/ботнет-индикаторы.
+# ======================================================================
+MalwareBlockEnabled: true
+
+# !!! ВАЖНО !!!
+# Это malware/C2 фиды, а НЕ обычные блок-листы рекламы (типа domains_all.lst —
+# он Vo1d/BadBox НЕ содержит). Проверь URL перед продакшеном.
+MalwareDomainFeeds:
+  - "https://urlhaus.abuse.ch/downloads/hostfile/"            # malware-домены (abuse.ch)
+MalwareIPFeeds:
+  - "https://feodotracker.abuse.ch/downloads/ipblocklist.txt" # botnet C2 IP (abuse.ch)
+
+# ban     = длинный локальный бан IP на ЭТОЙ ноде (работает сразу, без вебхука).
+# disable = + вебхук на панель, чтобы вырубить юзера на ВСЕХ нодах
+#           (нужен включённый SendWebhook + WebhookURL ниже).
+MalwareAction: "ban"
+MalwareBlockDuration: 1440   # минут (24ч) — заражённый бокс иначе просто переподключится
+BlocklistReload: "30m"       # как часто перечитывать фиды
+
+# --- Прочее (как в tblocker) ---
+# IgnoreEmail: false
+# StorageDir: "/opt/ablocker"
+# UsernameRegex: "^(.+)$"
+# Hostname: ""
+
+# --- Вебхук (нужен для MalwareAction: "disable") ---
+# Шлёт POST на твой n8n/панель. Поля: username, ip, server, action, duration, timestamp.
+# action принимает значения: block / unblock / malware_block / malware_disable
+# SendWebhook: true
+# WebhookURL: "https://your-n8n/webhook/ablocker"
+# WebhookTemplate: '{"username":"%s","ip":"%s","server":"%s","action":"%s","duration":%d,"timestamp":"%s"}'
+# WebhookHeaders:
+#   Authorization: "Bearer xxx"

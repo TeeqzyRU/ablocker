@@ -1,0 +1,40 @@
+version: 2
+project_name: ablocker
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ablocker
+    binary: ablocker
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{ .Tag }}
+
+archives:
+  - id: ablocker
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - config.yaml.default
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

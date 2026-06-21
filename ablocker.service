@@ -1,0 +1,16 @@
+[Unit]
+Description=ablocker - Xray abuse blocker (torrents + malware/botnet)
+Documentation=https://github.com/TeeqzyRU/ablocker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ablocker/ablocker -c /opt/ablocker/config.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
