@@ -1,76 +1,90 @@
 # ablocker
 
-**Xray abuse blocker** для нод Remnawave/Xray. Форк
-[tblocker](https://github.com/kutovoys/xray-torrent-blocker): делает всё то же
-(банит торрент-абузеров по access.log), **плюс** банит юзеров, чьи устройства
-заражены малварью/ботнетом (Vo1d / BadBox и т.п.).
+Xray abuse blocker для нод Remnawave / Xray. Блокирует не только торрент-абузеров
+(как [tblocker](https://github.com/kutovoys/xray-torrent-blocker)), но и устройства,
+заражённые малварью или ботнетом (Vo1d / BadBox и подобные).
+
+## Возможности
+
+- **Торрент-блокировка** — детект по тегу `TORRENT` в access.log Xray (требует
+  bittorrent-сниффинга и роутинга в blackhole), временный бан IP.
+- **Malware / botnet** — сверка адресов назначения с фидами C2/malware-индикаторов;
+  бан устройств, обращающихся к известной вредоносной инфраструктуре.
+- Фаервол на выбор: `iptables` или `nftables`.
+- Временные баны с автоматическим разбаном и сохранением между перезапусками.
+- Вебхуки (для отключения пользователя через панель в режиме `disable`).
 
 ## Как это работает
 
-ablocker читает `access.log` Xray и:
+ablocker читает `access.log` Xray построчно и реагирует на два типа событий:
 
-1. **Торренты** — ловит тег `TORRENT` (нужен bittorrent-сниффинг в Xray +
-   роутинг тега в blackhole) и временно банит IP. Как tblocker.
-2. **Malware / botnet** — сверяет адрес назначения каждого коннекта с фидами
-   C2/ботнет-индикаторов. Если устройство стучится на известную малварь-
-   инфраструктуру — баним юзера.
+1. **Торренты** — строки с тегом `TORRENT` → временный бан исходного IP
+   (по умолчанию 10 минут).
+2. **Malware / botnet** — адрес назначения сверяется с загруженными фидами
+   индикаторов. Совпадение → бан IP (по умолчанию 24 часа, так как заражённое
+   устройство переподключается после короткого бана).
 
-> Важно: малварь не видна «на устройстве», она палится по трафику на известные
-> C2-домены/IP. Поэтому нужен нормальный malware/C2 фид (abuse.ch URLhaus /
-> Feodo Tracker / ThreatFox), а **не** обычный блок-лист рекламы — он Vo1d/BadBox
-> не содержит. И статические листы ловят только известную инфраструктуру: свежие
-> DGA-домены пройдут мимо.
+Заражение определяется по трафику: устройство обращается к известным
+C2/ботнет-доменам или IP. Статические фиды покрывают только известную
+инфраструктуру — свежие DGA-домены могут не попадать в списки.
 
 ## Установка
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh -o ablocker-install.sh && bash ablocker-install.sh
 ```
 
-(репозиторий уже прописан — `TeeqzyRU/ablocker`)
+Требуются права root. Установщик скачивает бинарь из последнего релиза (или
+собирает из исходников при наличии Go), создаёт конфиг `/opt/ablocker/config.yaml`
+и systemd-сервис `ablocker`.
 
-Скрипт скачает релиз-бинарь (или соберёт из исходников, если есть Go),
-положит конфиг в `/opt/ablocker/config.yaml`, поднимет systemd-сервис
-`ablocker`.
+## Конфигурация
 
-## Релизы
+Файл `/opt/ablocker/config.yaml`. Основные параметры:
 
-Сборкой бинарей занимается goreleaser в GitHub Actions. Просто запушь тег:
+| Параметр | Назначение |
+|---|---|
+| `LogFile` | Путь к access.log ноды |
+| `BlockMode` | `iptables` или `nft` |
+| `BlockDuration` | Длительность бана за торрент (минуты) |
+| `MalwareBlockEnabled` | Включение malware/botnet-блокировки |
+| `MalwareDomainFeeds` / `MalwareIPFeeds` | Списки фидов индикаторов (домены и IP) |
+| `MalwareAction` | `ban` (локальный бан IP) или `disable` (вебхук на панель) |
+| `MalwareBlockDuration` | Длительность malware-бана (минуты) |
+| `BlocklistReload` | Интервал обновления фидов |
+
+Фиды должны содержать malware/C2-индикаторы (например, [abuse.ch](https://abuse.ch):
+URLhaus, Feodo Tracker, ThreatFox, SSLBL), а не обычные блок-листы рекламы —
+последние приведут к ложным банам обычных пользователей.
+
+## Режим disable
+
+Для отключения самого пользователя (а не только бана одного IP на одной ноде)
+используется `MalwareAction: disable` вместе с вебхуком (`SendWebhook` +
+`WebhookURL`). ablocker отправляет POST с действием `malware_disable`; обработчик
+на стороне панели (например, n8n) отключает пользователя через API Remnawave.
+
+## Сборка релизов
+
+Бинари собираются автоматически через GitHub Actions (goreleaser). Для выпуска
+новой версии:
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-→ соберутся `linux/amd64` и `linux/arm64`, появится Release с tar.gz, и
-`install.sh` их подхватит.
-
-## Конфиг (`/opt/ablocker/config.yaml`)
-
-Ключевые malware-параметры:
-
-- `MalwareBlockEnabled` — вкл/выкл malware-блок.
-- `MalwareDomainFeeds` / `MalwareIPFeeds` — список фидов (URL). Проверь их.
-- `MalwareAction` — `ban` (длинный локальный бан IP, работает сразу) или
-  `disable` (+ вебхук на панель, чтобы вырубить юзера на ВСЕХ нодах).
-- `MalwareBlockDuration` — длина бана в минутах (по умолчанию 1440 = 24ч;
-  короткий бан против ботнета бесполезен — бокс переподключится).
-- `BlocklistReload` — как часто перечитывать фиды.
-
-### Режим `disable` (рекомендуется для ботнета)
-
-Чтобы вырубать заражённого юзера сразу на всех нодах, включи вебхук
-(`SendWebhook: true` + `WebhookURL`). ablocker пошлёт POST с
-`action: "malware_disable"` — а уже твой n8n/обработчик дёрнет API Remnawave и
-задизейблит юзера. Сам ablocker в панель не ходит.
+Соберутся `linux/amd64` и `linux/arm64`, в разделе Releases появятся архивы.
 
 ## Управление
 
 ```bash
-systemctl status ablocker
-journalctl -u ablocker -f
+systemctl status ablocker      # состояние сервиса
+journalctl -u ablocker -f      # логи в реальном времени
 ```
 
 ## Благодарности
 
-Основано на [xray-torrent-blocker](https://github.com/kutovoys/xray-torrent-blocker)
-(Sergey Kutovoy, MIT). Malware/botnet-детект и упаковка — наше.
+Проект основан на [xray-torrent-blocker](https://github.com/kutovoys/xray-torrent-blocker)
+(автор Sergey Kutovoy, лицензия MIT). Добавлены детект malware/botnet и интеграция
+фидов индикаторов.
