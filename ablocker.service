@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=root
 ExecStart=/opt/ablocker/ablocker -c /opt/ablocker/config.yaml
-Restart=on-failure
+Restart=always
 RestartSec=5
 LimitNOFILE=1048576
 
