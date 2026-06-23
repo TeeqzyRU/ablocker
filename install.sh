@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # ablocker installer — ставит как tblocker, одной командой:
-#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh)
+#   curl -fsSL https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh -o ablocker-install.sh && bash ablocker-install.sh
 #
 set -euo pipefail
 
@@ -103,6 +103,25 @@ if [ -t 0 ]; then
   fi
 fi
 
+# --- logrotate для логов ноды (чтобы лог Xray не забил диск) ---
+LOG_DIR="$(dirname "$(grep -oP 'LogFile:\s*"\K[^"]+' "$INSTALL_DIR/config.yaml" 2>/dev/null || echo /var/log/remnanode/access.log)")"
+command -v logrotate >/dev/null 2>&1 || install_pkg logrotate || true
+if command -v logrotate >/dev/null 2>&1 && [ ! -f /etc/logrotate.d/remnanode ]; then
+  cat > /etc/logrotate.d/remnanode <<LR
+$LOG_DIR/*.log {
+    size 100M
+    rotate 3
+    missingok
+    notifempty
+    compress
+    copytruncate
+}
+LR
+  CRON_LINE='15 * * * * /usr/sbin/logrotate /etc/logrotate.d/remnanode'
+  ( crontab -l 2>/dev/null | grep -v 'logrotate.d/remnanode' || true; echo "$CRON_LINE" ) | crontab - 2>/dev/null || true
+  green "logrotate: $LOG_DIR/*.log — ротация при 100M, архив (gzip), хранить 3 архива, проверка раз в час"
+fi
+
 # --- systemd ---
 cat > "$SERVICE" <<UNIT
 [Unit]
@@ -114,7 +133,7 @@ Wants=network-online.target
 Type=simple
 User=root
 ExecStart=$BIN -c $INSTALL_DIR/config.yaml
-Restart=on-failure
+Restart=always
 RestartSec=5
 LimitNOFILE=1048576
 
