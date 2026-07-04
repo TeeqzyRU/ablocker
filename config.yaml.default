@@ -28,7 +28,8 @@ MalwareDomainFeeds:
   - "https://threatfox.abuse.ch/downloads/hostfile/"
 MalwareIPFeeds:
   - "https://feodotracker.abuse.ch/downloads/ipblocklist.txt" # botnet C2 IP (abuse.ch)
-  - "https://sslbl.abuse.ch/blacklist/sslipblacklist.txt"
+  - "https://cdn.jsdelivr.net/gh/elliotwutingfeng/ThreatFox-IOC-IPs@main/ips.txt" # все активные C2 IP из ThreatFox (~23k, зеркало обновляется ежечасно; jsDelivr доступен с РФ-нод)
+  # SSLBL IP-блэклист закрыт abuse.ch 2025-01-03 (файл пустой) — удалён из дефолтов.
 
 # ban     = длинный локальный бан IP на ЭТОЙ ноде (работает сразу, без вебхука).
 # disable = + вебхук на панель, чтобы вырубить юзера на ВСЕХ нодах

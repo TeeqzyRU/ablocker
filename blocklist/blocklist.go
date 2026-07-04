@@ -133,6 +133,13 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
+		if s.Type == "ip" {
+			if ip := parseIPToken(strings.ToLower(line)); ip != "" {
+				ips[ip] = s.Category
+				n++
+			}
+			continue
+		}
 		// "0.0.0.0 evil.com" / "127.0.0.1 evil.com" → take the last field.
 		if strings.IndexAny(line, " \t") >= 0 {
 			f := strings.Fields(line)
@@ -140,13 +147,6 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 		}
 		line = strings.ToLower(line)
 
-		if s.Type == "ip" {
-			if net.ParseIP(line) != nil {
-				ips[line] = s.Category
-				n++
-			}
-			continue
-		}
 		line = strings.TrimPrefix(line, "*.")
 		line = strings.TrimSuffix(line, ".")
 		if line != "" {
@@ -158,6 +158,40 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 		log.Printf("blocklist: scan error: %v", err)
 	}
 	return n
+}
+
+// parseIPToken extracts a bare IP from a feed token. Accepts "1.2.3.4",
+// "1.2.3.4:443" / "[2001:db8::1]:443" (IP:port lines, e.g. SSLBL-style) and
+// CSV rows — including quoted ones like ThreatFox exports:
+//
+//	"2026-06-14 12:25:44", "1832107", "195.222.53.130:6431", "ip:port", ...
+//
+// The first field that parses as an IP wins. Returns "" if no IP is found.
+func parseIPToken(line string) string {
+	if ip := bareIP(line); ip != "" {
+		return ip
+	}
+	if strings.ContainsRune(line, ',') {
+		for _, f := range strings.Split(line, ",") {
+			if ip := bareIP(f); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// bareIP strips whitespace/quotes and returns the token as an IP, accepting
+// bare-IP and IP:port forms.
+func bareIP(tok string) string {
+	tok = strings.Trim(strings.TrimSpace(tok), `"'`)
+	if net.ParseIP(tok) != nil {
+		return tok
+	}
+	if host, _, err := net.SplitHostPort(tok); err == nil && net.ParseIP(host) != nil {
+		return host
+	}
+	return ""
 }
 
 // Match checks a destination pulled from an access-log line. dest may be a bare

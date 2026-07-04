@@ -88,6 +88,7 @@ if [ "$UNINSTALL" = 1 ]; then
   iptables -t raw -X ABLOCKER_BLOCKED 2>/dev/null || true
   nft delete table inet ablocker 2>/dev/null || true
   rm -rf "$INSTALL_DIR"
+  rm -f /usr/local/bin/ablocker-bans /usr/local/bin/ablocker-unban
   green "Удалено. /etc/logrotate.d/remnanode оставил (ротация логов ноде полезна);"
   green "не нужен — убери: rm -f /etc/logrotate.d/remnanode"
   exit 0
@@ -228,6 +229,72 @@ case "${MALWARE:-}" in
   0) cfg_set MalwareBlockEnabled false ;;
 esac
 
+# --- хелперы: ablocker-bans (сводка) и ablocker-unban <IP> ---
+cat > /usr/local/bin/ablocker-bans <<'HLP1'
+#!/usr/bin/env bash
+# ablocker-bans — сводка: статус сервиса, настройки, активные баны, счётчики за сегодня.
+set -uo pipefail
+CFG="/opt/ablocker/config.yaml"
+J="/opt/ablocker/blocked_ips.json"
+st="$(systemctl is-active ablocker 2>/dev/null || true)"
+if [ "$st" = "active" ]; then printf "\033[32mablocker: active\033[0m\n"; else printf "\033[31mablocker: %s\033[0m\n" "${st:-не установлен}"; fi
+journalctl -u ablocker --no-pager 2>/dev/null | grep "Malware blocking enabled" | tail -1
+if [ -f "$CFG" ]; then grep -E '^(BlockDuration|MalwareBlockDuration|BlockMode):' "$CFG" | sed 's/[[:space:]]*#.*//; s/^/  /'; fi
+td="$(journalctl -u ablocker --since today --no-pager 2>/dev/null | grep -c '(torrent)' || true)"
+tm="$(journalctl -u ablocker --since today --no-pager 2>/dev/null | grep -c 'MALWARE hit' || true)"
+echo "  за сегодня: торрент-банов ${td:-0}, malware-хитов ${tm:-0}"
+echo
+if [ ! -s "$J" ]; then echo "Активных банов нет (файл $J пуст или отсутствует)."; exit 0; fi
+if command -v jq >/dev/null 2>&1; then
+  echo "Активных банов: $(jq 'length' "$J")"
+  jq -r '[.[]] | sort_by(.blocked_until)[] | "\(.ip)\t\(.username)\tдо \(.blocked_until)"' "$J" \
+    | { command -v column >/dev/null 2>&1 && column -t -s$'\t' || cat; }
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$J" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"Активных банов: {len(d)}")
+for v in sorted(d.values(), key=lambda x: x.get("blocked_until", "")):
+    print(f'{v.get("ip",""):18} {v.get("username",""):12} до {v.get("blocked_until","")}')
+PY
+else
+  echo "(нет jq/python3 — сырой список)"; cat "$J"
+fi
+HLP1
+chmod 0755 /usr/local/bin/ablocker-bans
+
+cat > /usr/local/bin/ablocker-unban <<'HLP2'
+#!/usr/bin/env bash
+# ablocker-unban <IP> — полностью снять бан: из blocked_ips.json (иначе бан
+# восстановится при рестарте), из фаервола, затем перезапустить сервис.
+set -uo pipefail
+IP="${1:-}"
+if [ -z "$IP" ]; then echo "Использование: ablocker-unban <IP>"; exit 1; fi
+J="/opt/ablocker/blocked_ips.json"
+systemctl stop ablocker 2>/dev/null || true
+if [ -s "$J" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    tmp="$(mktemp)"; jq --arg ip "$IP" 'del(.[$ip])' "$J" > "$tmp" && mv "$tmp" "$J"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$IP" "$J" <<'PY'
+import json, sys
+ip, path = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d.pop(ip, None)
+json.dump(d, open(path, "w"), indent=2)
+PY
+  else
+    echo "Нет ни jq, ни python3 — удали \"$IP\" из $J вручную, иначе бан вернётся после рестарта."
+  fi
+fi
+iptables -t raw -D ABLOCKER_BLOCKED -s "$IP" -j DROP 2>/dev/null || true
+nft delete element inet ablocker ABLOCKER_BLOCKED_IPS "{ $IP }" 2>/dev/null || true
+systemctl start ablocker 2>/dev/null || true
+echo "Разбанен: $IP"
+HLP2
+chmod 0755 /usr/local/bin/ablocker-unban
+green "Хелперы: ablocker-bans (сводка), ablocker-unban <IP> (разбан)."
+
 # --- logrotate + systemd-таймер (cron не нужен) ---
 LOGPATH="$(cfg_get LogFile)"
 LOG_DIR="$(dirname "${LOGPATH:-/var/log/remnanode/access.log}")"
@@ -309,6 +376,7 @@ if systemctl is-active --quiet ablocker; then
   green "Готово — ablocker работает."
   journalctl -u ablocker -n 50 --no-pager | grep -m1 "Malware blocking enabled" || true
   blue "Конфиг: BlockDuration=$(cfg_get BlockDuration) мин, MalwareBlockDuration=$(cfg_get MalwareBlockDuration) мин, BlockMode=$(cfg_get BlockMode)"
+  blue "Сводка банов: ablocker-bans    Разбан: ablocker-unban <IP>"
   blue "Логи:   journalctl -u ablocker -f"
   blue "Файл:   $INSTALL_DIR/config.yaml"
 else
