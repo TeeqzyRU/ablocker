@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 
@@ -18,6 +19,7 @@ var (
 	TorrentTag    string
 	BlockMode     string
 	BypassIPSet   = make(map[string]struct{})
+	BypassNets    []*net.IPNet
 	IgnoreEmail   bool
 	StorageDir    string
 
@@ -109,12 +111,19 @@ func LoadConfig(configPath string) error {
 	if cfg.BypassIPS != nil {
 		fmt.Println("Bypass IPS list:")
 		BypassIPSet = make(map[string]struct{})
-		for _, ip := range cfg.BypassIPS {
-			BypassIPSet[ip] = struct{}{}
-			fmt.Printf("- %s\n", ip)
+		BypassNets = nil
+		for _, entry := range cfg.BypassIPS {
+			// CIDR (e.g. 10.0.0.0/8) -> subnet match; otherwise exact IP.
+			if _, ipNet, err := net.ParseCIDR(entry); err == nil {
+				BypassNets = append(BypassNets, ipNet)
+			} else {
+				BypassIPSet[entry] = struct{}{}
+			}
+			fmt.Printf("- %s\n", entry)
 		}
 	} else {
 		BypassIPSet = make(map[string]struct{})
+		BypassNets = nil
 	}
 	if WebhookHeaders == nil {
 		WebhookHeaders = make(map[string]string)

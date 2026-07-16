@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -407,8 +408,19 @@ func UnblockIPAfterDelay(ip string, delay time.Duration, username string) {
 }
 
 func IsBypassedIP(ip string) bool {
-	_, exists := config.BypassIPSet[ip]
-	return exists
+	if _, exists := config.BypassIPSet[ip]; exists {
+		return true
+	}
+	if len(config.BypassNets) > 0 {
+		if parsed := net.ParseIP(ip); parsed != nil {
+			for _, n := range config.BypassNets {
+				if n.Contains(parsed) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func isValidIPFormat(ip string) bool {
