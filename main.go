@@ -82,6 +82,7 @@ func initConfig() {
 		if perr != nil || reload <= 0 {
 			reload = 30 * time.Minute
 		}
+		blocklist.SetExcludeNets(config.MalwareIPExclude)
 		matcher := blocklist.New(sources, reload)
 		d, i := matcher.Size()
 		log.Printf("Malware blocking enabled: %d domains, %d ips loaded (action=%s, duration=%dm)",

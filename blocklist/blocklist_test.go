@@ -43,11 +43,11 @@ func TestLoadIPFeedFormats(t *testing.T) {
 	feed := `# comment
 1.2.3.4
 5.6.7.8:447
-2025-01-03 10:00:00,9.9.9.9,443
+2025-01-03 10:00:00,45.9.9.9,443
 garbage-line
 `
 	_, ips := loadFromString(t, Source{Type: "ip", Category: CategoryBotnet}, feed)
-	for _, want := range []string{"1.2.3.4", "5.6.7.8", "9.9.9.9"} {
+	for _, want := range []string{"1.2.3.4", "5.6.7.8", "45.9.9.9"} {
 		if _, ok := ips[want]; !ok {
 			t.Errorf("ip %s not loaded; got %v", want, ips)
 		}
@@ -64,6 +64,54 @@ func TestLoadDomainHostsFile(t *testing.T) {
 		if _, ok := domains[want]; !ok {
 			t.Errorf("domain %s not loaded; got %v", want, domains)
 		}
+	}
+}
+
+func TestExcludeSharedCDNFromIPFeeds(t *testing.T) {
+	// Addresses that actually caused false-positive bans in production: they
+	// are Cloudflare front-ends listed in ThreatFox, but they serve thousands
+	// of legitimate sites.
+	feed := `188.114.96.0
+188.114.96.3
+188.114.97.0
+188.114.97.3
+104.21.7.84
+172.67.71.251
+1.1.1.1
+8.8.8.8
+45.137.22.99
+`
+	_, ips := loadFromString(t, Source{Type: "ip", Category: CategoryBotnet}, feed)
+
+	for _, cdn := range []string{
+		"188.114.96.0", "188.114.96.3", "188.114.97.0", "188.114.97.3",
+		"104.21.7.84", "172.67.71.251", "1.1.1.1", "8.8.8.8",
+	} {
+		if _, ok := ips[cdn]; ok {
+			t.Errorf("shared-CDN/resolver ip %s must be excluded from the feed", cdn)
+		}
+	}
+	// A regular bulletproof-hosting C2 address must still be loaded.
+	if _, ok := ips["45.137.22.99"]; !ok {
+		t.Error("regular C2 ip 45.137.22.99 should still be loaded")
+	}
+	if len(ips) != 1 {
+		t.Errorf("want exactly 1 ip after filtering, got %d: %v", len(ips), ips)
+	}
+}
+
+func TestSetExcludeNetsAddsCustomRanges(t *testing.T) {
+	defer SetExcludeNets(nil) // restore built-in defaults for other tests
+
+	SetExcludeNets([]string{"203.0.113.0/24"})
+	feed := "203.0.113.7\n198.51.100.9\n"
+	_, ips := loadFromString(t, Source{Type: "ip", Category: CategoryBotnet}, feed)
+
+	if _, ok := ips["203.0.113.7"]; ok {
+		t.Error("ip from a custom excluded range must not be loaded")
+	}
+	if _, ok := ips["198.51.100.9"]; !ok {
+		t.Error("ip outside excluded ranges should be loaded")
 	}
 }
 

@@ -31,6 +31,68 @@ type Source struct {
 	Type     string // "domain" or "ip"
 }
 
+// Shared CDN / anycast ranges are dropped from IP feeds. Malware hides behind
+// Cloudflare, so its front-end address ends up in C2 IP lists — but that same
+// address serves thousands of unrelated sites, and banning a client for
+// touching it is a guaranteed false positive. Such malware is still caught by
+// the domain feeds, which name the actual host. Extend via SetExcludeNets.
+var defaultExcludeCIDRs = []string{
+	// Cloudflare, published at https://www.cloudflare.com/ips/
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+	// Public DNS resolvers — never ban a client for resolving names.
+	"1.1.1.1/32", "1.0.0.1/32", "8.8.8.8/32", "8.8.4.4/32",
+	"9.9.9.9/32", "149.112.112.112/32", "208.67.222.222/32", "208.67.220.220/32",
+}
+
+var (
+	excludeMu   sync.RWMutex
+	excludeNets = parseCIDRs(defaultExcludeCIDRs)
+)
+
+func parseCIDRs(list []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(list))
+	for _, c := range list {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		} else {
+			log.Printf("blocklist: ignoring bad exclude CIDR %q: %v", c, err)
+		}
+	}
+	return out
+}
+
+// SetExcludeNets appends extra CIDRs to the built-in shared-CDN exclusions.
+// Call before New(); takes effect on the next reload.
+func SetExcludeNets(extra []string) {
+	nets := parseCIDRs(defaultExcludeCIDRs)
+	nets = append(nets, parseCIDRs(extra)...)
+	excludeMu.Lock()
+	excludeNets = nets
+	excludeMu.Unlock()
+}
+
+// isExcludedIP reports whether an IP belongs to a shared CDN / anycast range
+// and must never be treated as a malware indicator.
+func isExcludedIP(ip string) bool {
+	a := net.ParseIP(ip)
+	if a == nil {
+		return false
+	}
+	excludeMu.RLock()
+	defer excludeMu.RUnlock()
+	for _, n := range excludeNets {
+		if n.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // Matcher holds the loaded indicators and answers O(1) lookups, with a
 // background reloader so feeds stay fresh without a restart.
 type Matcher struct {
@@ -128,6 +190,7 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	n := 0
+	skipped := 0
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
@@ -135,6 +198,10 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 		}
 		if s.Type == "ip" {
 			if ip := parseIPToken(strings.ToLower(line)); ip != "" {
+				if isExcludedIP(ip) {
+					skipped++
+					continue
+				}
 				ips[ip] = s.Category
 				n++
 			}
@@ -156,6 +223,10 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 	}
 	if err := sc.Err(); err != nil {
 		log.Printf("blocklist: scan error: %v", err)
+	}
+	if skipped > 0 {
+		log.Printf("blocklist: skipped %d shared-CDN/anycast ip(s) from %s%s (false-positive guard)",
+			skipped, s.URL, s.Path)
 	}
 	return n
 }

@@ -42,6 +42,7 @@ var (
 	MalwareAction        string
 	MalwareBlockDuration int
 	BlocklistReload      string
+	MalwareIPExclude     []string
 )
 
 type Config struct {
@@ -66,6 +67,7 @@ type Config struct {
 	MalwareAction        string   `yaml:"MalwareAction"`
 	MalwareBlockDuration int      `yaml:"MalwareBlockDuration"`
 	BlocklistReload      string   `yaml:"BlocklistReload"`
+	MalwareIPExclude     []string `yaml:"MalwareIPExclude"`
 }
 
 func LoadConfig(configPath string) error {
@@ -155,6 +157,7 @@ func LoadConfig(configPath string) error {
 	if BlocklistReload == "" {
 		BlocklistReload = "30m"
 	}
+	MalwareIPExclude = cfg.MalwareIPExclude
 
 	return err
 }

@@ -32,6 +32,14 @@ MalwareBlockEnabled: true
 MalwareDomainFeeds:
   - "https://urlhaus.abuse.ch/downloads/hostfile/"            # malware-домены (abuse.ch)
   - "https://threatfox.abuse.ch/downloads/hostfile/"
+# Диапазоны, которые НИКОГДА не считаются malware-индикаторами (по адресу
+# назначения). Cloudflare и публичные DNS уже исключены встроенно: за ними
+# прячется малварь, но те же адреса обслуживают тысячи легитимных сайтов,
+# и бан клиента за обращение туда — гарантированный ложняк.
+# Здесь можно добавить свои (напр. IP собственных выходных нод):
+# MalwareIPExclude:
+#   - "203.0.113.0/24"
+
 MalwareIPFeeds:
   - "https://feodotracker.abuse.ch/downloads/ipblocklist.txt" # botnet C2 IP (abuse.ch)
   - "https://cdn.jsdelivr.net/gh/elliotwutingfeng/ThreatFox-IOC-IPs@main/ips.txt" # все активные C2 IP из ThreatFox (~23k, зеркало обновляется ежечасно; jsDelivr доступен с РФ-нод)
