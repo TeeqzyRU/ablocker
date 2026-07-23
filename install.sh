@@ -33,6 +33,7 @@ usage() { cat <<'H'
   --duration MIN          бан за торренты, минут            [ABLOCKER_DURATION]
   --malware-duration MIN  бан за malware, минут             [ABLOCKER_MW_DURATION]
   --logfile PATH          путь к access.log                 [ABLOCKER_LOGFILE]
+  --log-retention N       сколько архивов лога хранить      [ABLOCKER_LOG_RETENTION]
   --fw iptables|nft       фаервол                           [ABLOCKER_FW]
   --no-malware            выключить malware-блок            [ABLOCKER_MALWARE=0]
   --version vX.Y.Z        поставить конкретный релиз        [ABLOCKER_VERSION]
@@ -48,6 +49,7 @@ YES="${ABLOCKER_YES:-0}"
 DURATION="${ABLOCKER_DURATION:-}"
 MW_DURATION="${ABLOCKER_MW_DURATION:-}"
 LOGFILE="${ABLOCKER_LOGFILE:-}"
+LOG_RETENTION="${ABLOCKER_LOG_RETENTION:-}"
 FW="${ABLOCKER_FW:-}"
 MALWARE="${ABLOCKER_MALWARE:-}"
 VERSION="${ABLOCKER_VERSION:-}"
@@ -59,6 +61,7 @@ while [ $# -gt 0 ]; do
     --duration)         DURATION="${2:?--duration требует число минут}"; shift ;;
     --malware-duration) MW_DURATION="${2:?--malware-duration требует число минут}"; shift ;;
     --logfile)          LOGFILE="${2:?--logfile требует путь}"; shift ;;
+    --log-retention)    LOG_RETENTION="${2:?--log-retention требует число архивов}"; shift ;;
     --fw)               FW="${2:?--fw требует iptables|nft}"; shift ;;
     --no-malware)       MALWARE=0 ;;
     --version)          VERSION="${2:?--version требует тег, напр. v1.0.3}"; shift ;;
@@ -72,6 +75,7 @@ done
 is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 if [ -n "$DURATION" ];    then is_num "$DURATION"    || die "--duration: нужно число минут"; fi
 if [ -n "$MW_DURATION" ]; then is_num "$MW_DURATION" || die "--malware-duration: нужно число минут"; fi
+if [ -n "$LOG_RETENTION" ]; then is_num "$LOG_RETENTION" || die "--log-retention: нужно число архивов"; fi
 case "$FW" in ''|iptables|nft) ;; *) die "--fw: только iptables или nft" ;; esac
 
 [ "$(id -u)" -eq 0 ] || die "Запусти от root (sudo)."
@@ -211,6 +215,27 @@ if [ "$YES" != 1 ] && [ -t 0 ]; then
   CUR="$(cfg_get MalwareBlockEnabled)"
   read -rp "Блокировка malware/botnet? y/n [${CUR:-true}]: " a || true
   case "${a:-}" in y|Y) MALWARE=1 ;; n|N) MALWARE=0 ;; esac
+
+  CUR_LR="$(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1)"
+  AVAIL="$(df -h /var/log 2>/dev/null | awk 'NR==2{print $4}')"
+  echo "Хранение логов Xray — сколько архивов держать (сейчас: ${CUR_LR:-конфига нет}; свободно: ${AVAIL:-?}):"
+  echo "  1) 3    — минимум места (~0.2 ГБ), логи живут часы"
+  echo "  2) 24   — примерно сутки (~1.5 ГБ)"
+  echo "  3) 168  — примерно неделя (~10 ГБ), для дедиков с большим диском"
+  echo "  4) своё число"
+  echo "  (ротация при 100 МБ; сколько это по времени — зависит от трафика ноды)"
+  if [ -z "${CUR_LR:-}" ]; then PROMPT="Выбор [2]: "; DEF="2"; else PROMPT="Выбор [Enter — не менять]: "; DEF=""; fi
+  read -rp "$PROMPT" a || true
+  a="${a:-$DEF}"
+  case "$a" in
+    1) LOG_RETENTION=3 ;;
+    2) LOG_RETENTION=24 ;;
+    3) LOG_RETENTION=168 ;;
+    4) read -rp "  число архивов: " LOG_RETENTION || true
+       is_num "${LOG_RETENTION:-}" || { red "  не число — не меняю"; LOG_RETENTION=""; } ;;
+    "") ;;
+    *) red "  не понял — не меняю" ;;
+  esac
 fi
 
 # --- применяем настройки ---
@@ -300,20 +325,30 @@ LOGPATH="$(cfg_get LogFile)"
 LOG_DIR="$(dirname "${LOGPATH:-/var/log/remnanode/access.log}")"
 command -v logrotate >/dev/null 2>&1 || install_pkg logrotate || true
 if command -v logrotate >/dev/null 2>&1; then
-  if [ ! -f /etc/logrotate.d/remnanode ]; then
-    cat > /etc/logrotate.d/remnanode <<LR
+  LR_CONF=/etc/logrotate.d/remnanode
+  if [ ! -f "$LR_CONF" ]; then
+    # свежая нода: если хранение не задано — 24 архива (примерно сутки)
+    cat > "$LR_CONF" <<LR
 $LOG_DIR/*.log {
     size 100M
-    rotate 3
+    rotate ${LOG_RETENTION:-24}
     missingok
     notifempty
     compress
     copytruncate
 }
 LR
-    green "logrotate: $LOG_DIR/*.log — ротация при 100M, 3 архива"
+    green "logrotate: $LOG_DIR/*.log — ротация при 100M, хранить ${LOG_RETENTION:-24} архивов"
+  elif [ -n "${LOG_RETENTION:-}" ]; then
+    # конфиг уже есть: меняем только хранение, остальное не трогаем
+    if grep -qE '^[[:space:]]*rotate[[:space:]]+[0-9]+' "$LR_CONF"; then
+      sed -i -E "s/^([[:space:]]*)rotate[[:space:]]+[0-9]+/\1rotate $LOG_RETENTION/" "$LR_CONF"
+    else
+      sed -i -E "0,/\{/s//{\n    rotate $LOG_RETENTION/" "$LR_CONF"
+    fi
+    green "logrotate: хранение изменено на $LOG_RETENTION архивов"
   else
-    blue "logrotate-конфиг уже есть — не трогаю."
+    blue "logrotate-конфиг уже есть — не трогаю (сменить: --log-retention N)."
   fi
   LR_BIN="$(command -v logrotate)"
   cat > /etc/systemd/system/ablocker-logrotate.service <<UNIT
@@ -376,6 +411,7 @@ if systemctl is-active --quiet ablocker; then
   green "Готово — ablocker работает."
   journalctl -u ablocker -n 50 --no-pager | grep -m1 "Malware blocking enabled" || true
   blue "Конфиг: BlockDuration=$(cfg_get BlockDuration) мин, MalwareBlockDuration=$(cfg_get MalwareBlockDuration) мин, BlockMode=$(cfg_get BlockMode)"
+  blue "Логи ноды: хранить $(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1) архивов, ротация при 100M"
   blue "Сводка банов: ablocker-bans    Разбан: ablocker-unban <IP>"
   blue "Логи:   journalctl -u ablocker -f"
   blue "Файл:   $INSTALL_DIR/config.yaml"
