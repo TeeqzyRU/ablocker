@@ -216,8 +216,11 @@ if [ "$YES" != 1 ] && [ -t 0 ]; then
   read -rp "Блокировка malware/botnet? y/n [${CUR:-true}]: " a || true
   case "${a:-}" in y|Y) MALWARE=1 ;; n|N) MALWARE=0 ;; esac
 
-  CUR_LR="$(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1)"
-  AVAIL="$(df -h /var/log 2>/dev/null | awk 'NR==2{print $4}')"
+  CUR_LR=""
+  if [ -f /etc/logrotate.d/remnanode ]; then
+    CUR_LR="$(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode | head -1)"
+  fi
+  AVAIL="$(df -h /var/log 2>/dev/null | awk 'NR==2{print $4}' || true)"
   echo "Хранение логов Xray — сколько архивов держать (сейчас: ${CUR_LR:-конфига нет}; свободно: ${AVAIL:-?}):"
   echo "  1) 3    — минимум места (~0.2 ГБ), логи живут часы"
   echo "  2) 24   — примерно сутки (~1.5 ГБ)"
@@ -411,7 +414,7 @@ if systemctl is-active --quiet ablocker; then
   green "Готово — ablocker работает."
   journalctl -u ablocker -n 50 --no-pager | grep -m1 "Malware blocking enabled" || true
   blue "Конфиг: BlockDuration=$(cfg_get BlockDuration) мин, MalwareBlockDuration=$(cfg_get MalwareBlockDuration) мин, BlockMode=$(cfg_get BlockMode)"
-  blue "Логи ноды: хранить $(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1) архивов, ротация при 100M"
+  blue "Логи ноды: хранить $(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1 || true) архивов, ротация при 100M"
   blue "Сводка банов: ablocker-bans    Разбан: ablocker-unban <IP>"
   blue "Логи:   journalctl -u ablocker -f"
   blue "Файл:   $INSTALL_DIR/config.yaml"
