@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+// netEntry is one CIDR indicator from an IP feed.
+type netEntry struct {
+	net *net.IPNet
+	cat Category
+}
+
 // Category labels an indicator so the caller can pick a different action per
 // type (e.g. "ban the IP" for torrents vs "disable the user" for botnets).
 type Category string
@@ -20,6 +26,12 @@ const (
 	CategoryMalware Category = "malware"
 	CategoryBotnet  Category = "botnet"
 	CategorySpam    Category = "spam"
+	// CategorySinkhole marks research sinkholes (Shadowserver, Microsoft, CERT
+	// and friends) that have taken over abandoned C2 domains. A healthy device
+	// never talks to them, so a hit is a high-confidence sign that the client
+	// is infected — even when the original C2 is long dead and absent from
+	// live-threat feeds.
+	CategorySinkhole Category = "sinkhole"
 )
 
 // Source is one feed. Provide URL (remote) and/or Path (local file). Type tells
@@ -99,6 +111,7 @@ type Matcher struct {
 	mu      sync.RWMutex
 	domains map[string]Category
 	ips     map[string]Category
+	ipNets  []netEntry
 
 	sources  []Source
 	interval time.Duration
@@ -135,14 +148,15 @@ func (m *Matcher) reloadLoop() {
 func (m *Matcher) reload() {
 	domains := make(map[string]Category)
 	ips := make(map[string]Category)
+	var nets []netEntry
 
 	for _, s := range m.sources {
 		n := 0
 		if s.Path != "" {
-			n += loadReader(openFile(s.Path), s, domains, ips)
+			n += loadReader(openFile(s.Path), s, domains, ips, &nets)
 		}
 		if s.URL != "" {
-			n += loadReader(m.openURL(s.URL), s, domains, ips)
+			n += loadReader(m.openURL(s.URL), s, domains, ips, &nets)
 		}
 		log.Printf("blocklist: +%d %s indicators [%s] from %s%s",
 			n, s.Type, s.Category, s.URL, s.Path)
@@ -151,9 +165,14 @@ func (m *Matcher) reload() {
 	m.mu.Lock()
 	m.domains = domains
 	m.ips = ips
+	m.ipNets = nets
 	m.mu.Unlock()
 
-	log.Printf("blocklist: active set — %d domains, %d ips", len(domains), len(ips))
+	if len(nets) > 0 {
+		log.Printf("blocklist: active set — %d domains, %d ips, %d cidr", len(domains), len(ips), len(nets))
+	} else {
+		log.Printf("blocklist: active set — %d domains, %d ips", len(domains), len(ips))
+	}
 }
 
 func openFile(path string) io.ReadCloser {
@@ -181,7 +200,7 @@ func (m *Matcher) openURL(url string) io.ReadCloser {
 
 // loadReader parses a line-based list (one indicator per line; #, // comments
 // and blank lines skipped; hosts-file "0.0.0.0 domain" format tolerated).
-func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int {
+func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category, nets *[]netEntry) int {
 	if r == nil {
 		return 0
 	}
@@ -197,6 +216,16 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 			continue
 		}
 		if s.Type == "ip" {
+			// CIDR indicator (e.g. Microsoft sinkhole 199.2.137.0/24).
+			if c := parseCIDRToken(line); c != nil {
+				if !isExcludedNet(c) {
+					*nets = append(*nets, netEntry{net: c, cat: s.Category})
+					n++
+				} else {
+					skipped++
+				}
+				continue
+			}
 			if ip := parseIPToken(strings.ToLower(line)); ip != "" {
 				if isExcludedIP(ip) {
 					skipped++
@@ -229,6 +258,49 @@ func loadReader(r io.ReadCloser, s Source, domains, ips map[string]Category) int
 			skipped, s.URL, s.Path)
 	}
 	return n
+}
+
+// parseCIDRToken extracts a CIDR network from a feed line. Handles bare
+// "10.0.0.0/8" and CSV rows such as ThreatFox/sinkhole exports:
+//
+//	Microsoft,199.2.137.0/24,Microsoft,https://...
+//
+// Returns nil when the line holds no CIDR.
+func parseCIDRToken(line string) *net.IPNet {
+	try := func(tok string) *net.IPNet {
+		tok = strings.Trim(strings.TrimSpace(tok), `"'`)
+		if !strings.Contains(tok, "/") {
+			return nil
+		}
+		if _, n, err := net.ParseCIDR(tok); err == nil {
+			return n
+		}
+		return nil
+	}
+	if n := try(line); n != nil {
+		return n
+	}
+	if strings.ContainsRune(line, ',') {
+		for _, f := range strings.Split(line, ",") {
+			if n := try(f); n != nil {
+				return n
+			}
+		}
+	}
+	return nil
+}
+
+// isExcludedNet drops a CIDR indicator that overlaps the shared-CDN guard, so
+// a feed can never blocklist a whole Cloudflare range by accident.
+func isExcludedNet(c *net.IPNet) bool {
+	excludeMu.RLock()
+	defer excludeMu.RUnlock()
+	for _, n := range excludeNets {
+		if n.Contains(c.IP) || c.Contains(n.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseIPToken extracts a bare IP from a feed token. Accepts "1.2.3.4",
@@ -277,9 +349,16 @@ func (m *Matcher) Match(dest string) (Category, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if net.ParseIP(dest) != nil {
-		c, ok := m.ips[dest]
-		return c, ok
+	if a := net.ParseIP(dest); a != nil {
+		if c, ok := m.ips[dest]; ok {
+			return c, true
+		}
+		for _, e := range m.ipNets {
+			if e.net.Contains(a) {
+				return e.cat, true
+			}
+		}
+		return "", false
 	}
 
 	host := dest

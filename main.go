@@ -78,6 +78,9 @@ func initConfig() {
 		for _, u := range config.MalwareIPFeeds {
 			sources = append(sources, blocklist.Source{URL: u, Category: blocklist.CategoryBotnet, Type: "ip"})
 		}
+		for _, u := range config.SinkholeFeeds {
+			sources = append(sources, blocklist.Source{URL: u, Category: blocklist.CategorySinkhole, Type: "ip"})
+		}
 		reload, perr := time.ParseDuration(config.BlocklistReload)
 		if perr != nil || reload <= 0 {
 			reload = 30 * time.Minute

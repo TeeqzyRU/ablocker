@@ -39,6 +39,7 @@ var (
 	MalwareBlockEnabled  bool
 	MalwareDomainFeeds   []string
 	MalwareIPFeeds       []string
+	SinkholeFeeds        []string
 	MalwareAction        string
 	MalwareBlockDuration int
 	BlocklistReload      string
@@ -64,6 +65,7 @@ type Config struct {
 	MalwareBlockEnabled  bool     `yaml:"MalwareBlockEnabled"`
 	MalwareDomainFeeds   []string `yaml:"MalwareDomainFeeds"`
 	MalwareIPFeeds       []string `yaml:"MalwareIPFeeds"`
+	SinkholeFeeds        []string `yaml:"SinkholeFeeds"`
 	MalwareAction        string   `yaml:"MalwareAction"`
 	MalwareBlockDuration int      `yaml:"MalwareBlockDuration"`
 	BlocklistReload      string   `yaml:"BlocklistReload"`
@@ -145,6 +147,7 @@ func LoadConfig(configPath string) error {
 	MalwareBlockEnabled = cfg.MalwareBlockEnabled
 	MalwareDomainFeeds = cfg.MalwareDomainFeeds
 	MalwareIPFeeds = cfg.MalwareIPFeeds
+	SinkholeFeeds = cfg.SinkholeFeeds
 	MalwareAction = cfg.MalwareAction
 	if MalwareAction == "" {
 		MalwareAction = "ban"

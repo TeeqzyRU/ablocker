@@ -2,6 +2,7 @@ package blocklist
 
 import (
 	"io"
+	"net"
 	"strings"
 	"testing"
 )
@@ -33,10 +34,62 @@ func TestParseIPToken(t *testing.T) {
 
 func loadFromString(t *testing.T, s Source, body string) (map[string]Category, map[string]Category) {
 	t.Helper()
+	domains, ips, _ := loadFromStringNets(t, s, body)
+	return domains, ips
+}
+
+func loadFromStringNets(t *testing.T, s Source, body string) (map[string]Category, map[string]Category, []netEntry) {
+	t.Helper()
 	domains := make(map[string]Category)
 	ips := make(map[string]Category)
-	loadReader(io.NopCloser(strings.NewReader(body)), s, domains, ips)
-	return domains, ips
+	var nets []netEntry
+	loadReader(io.NopCloser(strings.NewReader(body)), s, domains, ips, &nets)
+	return domains, ips, nets
+}
+
+func TestLoadSinkholeCSVWithCIDR(t *testing.T) {
+	// Real shape of the community sinkhole list: CSV, CRLF, CIDR rows, and a
+	// header line that holds no indicator.
+	feed := "Organization,IP Range,Whois,Notes\r\n" +
+		"Shadowserver,216.218.185.162,sinkhole.shadowserver.org,\r\n" +
+		"Microsoft,199.2.137.0/24,Microsoft,\r\n" +
+		"CERT Polska,148.81.111.111,sinkhole.cert.pl,\r\n" +
+		"Cloudflare-ish,104.16.0.0/13,should be dropped,\r\n"
+
+	_, ips, nets := loadFromStringNets(t, Source{Type: "ip", Category: CategorySinkhole}, feed)
+
+	if _, ok := ips["216.218.185.162"]; !ok {
+		t.Error("bare sinkhole ip must be loaded")
+	}
+	if _, ok := ips["148.81.111.111"]; !ok {
+		t.Error("second bare sinkhole ip must be loaded")
+	}
+	// One CIDR kept (Microsoft), the Cloudflare-overlapping one dropped.
+	if len(nets) != 1 {
+		t.Fatalf("want exactly 1 cidr indicator, got %d: %v", len(nets), nets)
+	}
+	if got := nets[0].net.String(); got != "199.2.137.0/24" {
+		t.Errorf("kept cidr = %s, want 199.2.137.0/24", got)
+	}
+	if nets[0].cat != CategorySinkhole {
+		t.Errorf("category = %s, want sinkhole", nets[0].cat)
+	}
+}
+
+func TestMatchCIDRIndicator(t *testing.T) {
+	m := &Matcher{
+		domains: map[string]Category{},
+		ips:     map[string]Category{},
+	}
+	_, n, _ := net.ParseCIDR("199.2.137.0/24")
+	m.ipNets = []netEntry{{net: n, cat: CategorySinkhole}}
+
+	if c, ok := m.Match("199.2.137.55"); !ok || c != CategorySinkhole {
+		t.Errorf("ip inside sinkhole cidr should match, got %q/%v", c, ok)
+	}
+	if _, ok := m.Match("199.2.138.55"); ok {
+		t.Error("ip outside the cidr must not match")
+	}
 }
 
 func TestLoadIPFeedFormats(t *testing.T) {
