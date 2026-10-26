@@ -162,3 +162,58 @@ BlockDuration: "invalid"
 		t.Error("Expected error when loading invalid YAML")
 	}
 }
+
+func loadFromString(t *testing.T, body string) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "cfg_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := LoadConfig(f.Name()); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+}
+
+func TestFanoutDefaultsForConfigWithoutKeys(t *testing.T) {
+	// A config written before the feature existed: an upgrade must turn the
+	// detector on in log-only mode, never start banning by itself.
+	loadFromString(t, "LogFile: \"/var/log/x.log\"\nBlockDuration: 43200\nTorrentTag: \"TORRENT\"\n")
+	if !FanoutEnabled || FanoutAction != "log" || FanoutThreshold != 150 || FanoutWindow != "10m" {
+		t.Fatalf("defaults = enabled:%v action:%q threshold:%d window:%q; want true, log, 150, 10m",
+			FanoutEnabled, FanoutAction, FanoutThreshold, FanoutWindow)
+	}
+}
+
+func TestFanoutExplicitSettings(t *testing.T) {
+	loadFromString(t, "FanoutEnabled: true\nFanoutAction: \"ban\"\nFanoutThreshold: 200\nFanoutWindow: \"5m\"\nFanoutIgnorePorts: [27015, 3074]\n")
+	if !FanoutEnabled || FanoutAction != "ban" || FanoutThreshold != 200 || FanoutWindow != "5m" || len(FanoutIgnorePorts) != 2 {
+		t.Fatalf("got enabled:%v action:%q threshold:%d window:%q ports:%v",
+			FanoutEnabled, FanoutAction, FanoutThreshold, FanoutWindow, FanoutIgnorePorts)
+	}
+
+	loadFromString(t, "FanoutEnabled: false\n")
+	if FanoutEnabled {
+		t.Fatal("FanoutEnabled: false must disable the detector")
+	}
+
+	loadFromString(t, "FanoutAction: \"kill\"\n")
+	if FanoutAction != "log" {
+		t.Fatalf("unknown action must fall back to log, got %q", FanoutAction)
+	}
+}
+
+func TestShippedDefaultConfigFanoutIsLogOnly(t *testing.T) {
+	// The config.yaml.default that the installer copies on fresh nodes must
+	// parse and must never ship the detector in ban mode.
+	if err := LoadConfig("../config.yaml.default"); err != nil {
+		t.Fatalf("config.yaml.default: %v", err)
+	}
+	if !FanoutEnabled || FanoutAction != "log" || FanoutThreshold != 150 || FanoutWindow != "10m" {
+		t.Fatalf("shipped defaults = enabled:%v action:%q threshold:%d window:%q; want true, log, 150, 10m",
+			FanoutEnabled, FanoutAction, FanoutThreshold, FanoutWindow)
+	}
+}

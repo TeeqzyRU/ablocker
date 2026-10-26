@@ -8,6 +8,9 @@ Xray abuse blocker для нод Remnawave / Xray. Блокирует не то�
 
 - **Торрент-блокировка** — детект по тегу `TORRENT` в access.log Xray (требует
   bittorrent-сниффинга и роутинга в blackhole), временный бан IP.
+- **Детект шифрованных торрентов по поведению (fan-out)** — ловит клиентов,
+  которых сниффинг Xray и сигнатурные правила не видят: торрент за минуты
+  подключается к сотням разных пиров, обычное устройство — нет.
 - **Malware / botnet** — сверка адресов назначения с фидами C2/malware-индикаторов;
   бан устройств, обращающихся к известной вредоносной инфраструктуре.
 - Фаервол на выбор: `iptables` или `nftables`.
@@ -18,10 +21,13 @@ Xray abuse blocker для нод Remnawave / Xray. Блокирует не то�
 
 ## Как это работает
 
-ablocker читает `access.log` Xray построчно и реагирует на два типа событий:
+ablocker читает `access.log` Xray построчно и реагирует на три типа событий:
 
 1. **Торренты** — строки с тегом `TORRENT` → временный бан исходного IP.
-2. **Malware / botnet** — адрес назначения сверяется с загруженными фидами
+2. **Шифрованные торренты** — у пользователя за окно (10 минут) набирается
+   слишком много разных пиров на несервисных портах → запись в журнал или бан
+   (см. [fan-out](#поведенческий-детект-торрентов-fan-out)).
+3. **Malware / botnet** — адрес назначения сверяется с загруженными фидами
    индикаторов. Совпадение → бан IP (заражённое устройство переподключается
    после короткого бана, поэтому баны длинные).
 
@@ -40,7 +46,8 @@ curl -fsSL https://cdn.jsdelivr.net/gh/TeeqzyRU/ablocker@main/install.sh -o ablo
 Если jsDelivr недоступен — то же самое через
 `https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh`.
 
-Без вопросов, с дефолтами (лог remnanode, iptables, malware on, бан 30 дней):
+Без вопросов, с дефолтами (лог remnanode, iptables, malware on, бан 30 дней,
+fan-out в режиме `log`):
 
 ```bash
 bash ablocker-install.sh -y
@@ -57,6 +64,7 @@ bash ablocker-install.sh -y
 | `--log-retention N` | `ABLOCKER_LOG_RETENTION` | сколько архивов лога Xray хранить |
 | `--fw iptables\|nft` | `ABLOCKER_FW` | фаервол |
 | `--no-malware` | `ABLOCKER_MALWARE=0` | выключить malware-блок |
+| `--fanout log\|ban\|off` | `ABLOCKER_FANOUT` | детект шифрованных торрентов: только журнал / бан / выкл |
 | `--version vX.Y.Z` | `ABLOCKER_VERSION` | поставить конкретный релиз |
 | `--uninstall` | — | удалить ablocker с ноды |
 
@@ -64,6 +72,7 @@ bash ablocker-install.sh -y
 
 ```bash
 bash ablocker-install.sh -y --duration 1440
+bash ablocker-install.sh -y --fanout ban
 bash ablocker-install.sh --fw nft --logfile /var/log/xray/access.log
 bash ablocker-install.sh --uninstall
 ```
@@ -73,8 +82,8 @@ bash ablocker-install.sh --uninstall
 
 Требуются права root и systemd. Инсталлер скачивает бинарь из последнего релиза
 (или собирает из исходников при наличии Go), создаёт `/opt/ablocker/config.yaml`,
-systemd-сервис `ablocker`, хелперы и ротацию логов (100M, 3 архива, проверка
-раз в час через systemd-таймер — cron не нужен).
+systemd-сервис `ablocker`, хелперы и ротацию логов (100M, 24 архива по
+умолчанию, проверка раз в час через systemd-таймер — cron не нужен).
 
 ## Конфигурация
 
@@ -90,6 +99,9 @@ systemd-сервис `ablocker`, хелперы и ротацию логов (10
 | `MalwareAction` | `ban` (локальный бан IP) или `disable` (вебхук на панель) |
 | `MalwareBlockDuration` | Длительность malware-бана (минуты) |
 | `BlocklistReload` | Интервал обновления фидов |
+| `FanoutEnabled` / `FanoutAction` | Детект шифрованных торрентов: вкл/выкл, `log` или `ban` |
+| `FanoutThreshold` / `FanoutWindow` | Сколько разных пиров за какое окно считать торрентом (150 / `10m`) |
+| `FanoutIgnorePorts` | Доп. порты, которые не считать |
 
 После правки конфига — `systemctl restart ablocker` (конфиг читается при старте).
 
@@ -105,9 +117,82 @@ IP-блэклист закрыт abuse.ch в январе 2025 и из дефо�
 ## Управление
 
 ```bash
-ablocker-bans            # сводка: статус, настройки, активные баны, счётчики за сегодня
-ablocker-unban 1.2.3.4   # полный разбан IP (json + фаервол + рестарт)
+ablocker-bans                    # сводка: статус, настройки, активные баны, счётчики за сегодня
+ablocker-unban 1.2.3.4           # полный разбан IP (json + фаервол + рестарт)
+ablocker-unban 1.2.3.4 5.6.7.8   # сразу несколько — сервис перезапускается один раз
 ```
+
+## Поведенческий детект торрентов (fan-out)
+
+Тег `TORRENT` ставит сниффинг Xray, а он распознаёт только **незашифрованный**
+BitTorrent — по документации Remnawave это 10–30% торрент-трафика. qBittorrent,
+Transmission и другие клиенты по умолчанию шифруют протокол и ходят по uTP
+поверх UDP: тега нет, и сигнатурные правила iptables (в том числе скрипты,
+которые присылают хостеры) их тоже не видят. Отсюда DMCA-жалобы с нод, где
+блокировка «стоит».
+
+Шифрование прячет содержимое, но не поведение. Торрент-клиент за несколько минут
+подключается к сотням **разных** пиров по голым IP на случайных портах; обычное
+устройство — к нескольким десяткам адресов, почти все на 443/80 и стандартных
+сервисных портах. ablocker считает для каждого пользователя уникальные IP
+назначения на несервисных портах в скользящем окне и срабатывает при
+превышении порога.
+
+Не считаются: домены (обычный браузинг), приватные и служебные адреса, порты
+веба, DNS/DoT, NTP, почты, XMPP, пушей Apple/Google, STUN/TURN (голосовые и
+видеозвонки), Windows Delivery Optimization и P2P-порты популярных блокчейнов.
+Полный список — `DefaultIgnorePorts` в `fanout/fanout.go`.
+
+Калибровка на реальных логах (окно 10 минут): подтверждённые торрент-клиенты —
+228 и 317 уникальных пиров, самые активные обычные пользователи — до ~50.
+Порог по умолчанию — 150.
+
+```yaml
+FanoutEnabled: true
+FanoutAction: "log"        # log | ban
+FanoutThreshold: 150
+FanoutWindow: "10m"
+# FanoutIgnorePorts: [27015]
+```
+
+| Режим | Что происходит | Строка в журнале |
+|---|---|---|
+| `log` (по умолчанию) | только запись | `FANOUT: user=… ip=… peers=… window=10m action=log` |
+| `ban` | бан IP как за торрент, на `BlockDuration` | `User … with IP: … blocked for N minutes (torrent) [fanout: … peers in 10m]` |
+
+IP из `BypassIPS` не банятся никогда, но детект всё равно пишется в журнал
+(`… (IP в BypassIPS — не баню)`): по нему видно аккаунт, который качает через
+белый список. С включённым вебхуком уходят действия `fanout_block` (бан) и
+`fanout_detect` (детект без бана).
+
+Конфиги, созданные до v1.0.9, инсталлер при обновлении дополняет ключами
+`FanoutEnabled: true` и `FanoutAction: "log"` — это те же значения, что бинарь
+берёт по умолчанию, поведение не меняется, но режим виден в файле.
+
+Порядок включения на ноде:
+
+```bash
+# 1) обновить ablocker — fan-out включится в режиме log
+bash ablocker-install.sh -y
+# 2) через сутки посмотреть, кого поймал
+journalctl -u ablocker --since -24h --no-pager | grep FANOUT
+# 3) ложняков нет — включить бан
+sed -i 's/^FanoutAction:.*/FanoutAction: "ban"/' /opt/ablocker/config.yaml && systemctl restart ablocker
+```
+
+Если срабатывает на пользователе, который не качает, — посмотреть, на какие
+порты он ходит, и добавить легитимный порт в `FanoutIgnorePorts` (или поднять
+`FanoutThreshold`):
+
+```bash
+grep 'email: 100003$' /var/log/remnanode/access.log \
+  | grep -oE 'accepted (tcp|udp):[0-9.]+:[0-9]+' | awk -F: '{print $NF}' \
+  | sort | uniq -c | sort -rn | head
+```
+
+Счётчик ведётся по пользователю (email из лога Xray); если email в строке нет,
+ключом служит IP клиента. Память на пользователя ограничена, неактивные
+пользователи забываются через окно.
 
 ## Хранение логов ноды
 
@@ -200,6 +285,7 @@ systemctl status ablocker                                    # состояни�
 journalctl -u ablocker -f                                    # логи в реальном времени
 journalctl -u ablocker --no-pager | grep "(torrent)"         # история банов за торренты
 journalctl -u ablocker --no-pager | grep "MALWARE hit"       # история malware-хитов
+journalctl -u ablocker --no-pager | grep "FANOUT"            # детекты шифрованных торрентов без бана
 cat /opt/ablocker/blocked_ips.json                           # активные баны (сырой JSON)
 iptables -t raw -L ABLOCKER_BLOCKED -n -v                    # правила фаервола (или: nft list table inet ablocker)
 ```

@@ -10,6 +10,7 @@ import (
 
 	"ablocker/blocklist"
 	"ablocker/config"
+	"ablocker/fanout"
 	"ablocker/firewall"
 	"ablocker/storage"
 	"ablocker/utils"
@@ -91,6 +92,25 @@ func initConfig() {
 		log.Printf("Malware blocking enabled: %d domains, %d ips loaded (action=%s, duration=%dm)",
 			d, i, config.MalwareAction, config.MalwareBlockDuration)
 		utils.SetMalwareMatcher(matcher)
+	}
+
+	if config.FanoutEnabled {
+		window, werr := time.ParseDuration(config.FanoutWindow)
+		if werr != nil || window <= 0 {
+			window = 10 * time.Minute
+			config.FanoutWindow = window.String()
+		}
+		det := fanout.New(config.FanoutThreshold, window, config.FanoutIgnorePorts)
+		utils.SetFanoutDetector(det)
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for range t.C {
+				det.Sweep()
+			}
+		}()
+		log.Printf("Fan-out torrent detection enabled: %d peers in %s on non-service ports -> action=%s",
+			config.FanoutThreshold, config.FanoutWindow, config.FanoutAction)
 	}
 
 	utils.ScheduleBlockedIPsUpdate()

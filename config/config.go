@@ -44,6 +44,13 @@ var (
 	MalwareBlockDuration int
 	BlocklistReload      string
 	MalwareIPExclude     []string
+
+	// Behavioural torrent detection (fan-out to many peers)
+	FanoutEnabled     bool
+	FanoutAction      string
+	FanoutThreshold   int
+	FanoutWindow      string
+	FanoutIgnorePorts []int
 )
 
 type Config struct {
@@ -70,6 +77,14 @@ type Config struct {
 	MalwareBlockDuration int      `yaml:"MalwareBlockDuration"`
 	BlocklistReload      string   `yaml:"BlocklistReload"`
 	MalwareIPExclude     []string `yaml:"MalwareIPExclude"`
+
+	// Behavioural torrent detection. FanoutEnabled is a pointer so that a
+	// config written before this feature (key absent) gets it switched on.
+	FanoutEnabled     *bool  `yaml:"FanoutEnabled"`
+	FanoutAction      string `yaml:"FanoutAction"`
+	FanoutThreshold   int    `yaml:"FanoutThreshold"`
+	FanoutWindow      string `yaml:"FanoutWindow"`
+	FanoutIgnorePorts []int  `yaml:"FanoutIgnorePorts"`
 }
 
 func LoadConfig(configPath string) error {
@@ -161,6 +176,28 @@ func LoadConfig(configPath string) error {
 		BlocklistReload = "30m"
 	}
 	MalwareIPExclude = cfg.MalwareIPExclude
+
+	// Behavioural torrent detection: on by default in log-only mode, so an
+	// upgrade only adds visibility and never starts banning on its own.
+	FanoutEnabled = cfg.FanoutEnabled == nil || *cfg.FanoutEnabled
+	switch cfg.FanoutAction {
+	case "ban":
+		FanoutAction = "ban"
+	case "", "log":
+		FanoutAction = "log"
+	default:
+		fmt.Printf("Unknown FanoutAction %q, falling back to \"log\"\n", cfg.FanoutAction)
+		FanoutAction = "log"
+	}
+	FanoutThreshold = cfg.FanoutThreshold
+	if FanoutThreshold <= 0 {
+		FanoutThreshold = 150
+	}
+	FanoutWindow = cfg.FanoutWindow
+	if FanoutWindow == "" {
+		FanoutWindow = "10m"
+	}
+	FanoutIgnorePorts = cfg.FanoutIgnorePorts
 
 	return err
 }

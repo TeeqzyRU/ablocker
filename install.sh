@@ -6,11 +6,13 @@
 #   curl -fsSL https://cdn.jsdelivr.net/gh/TeeqzyRU/ablocker@main/install.sh -o ablocker-install.sh && bash ablocker-install.sh
 #   (если jsDelivr недоступен: https://raw.githubusercontent.com/TeeqzyRU/ablocker/main/install.sh)
 #
-# Без вопросов, дефолты (лог remnanode, iptables, malware on, бан 30 дней):
+# Без вопросов, дефолты (лог remnanode, iptables, malware on, бан 30 дней,
+# поведенческий детект торрентов в режиме log):
 #   bash ablocker-install.sh -y
 #
 # Примеры:
 #   bash ablocker-install.sh -y --duration 1440
+#   bash ablocker-install.sh -y --fanout ban     # детект шифрованных торрентов — банить
 #   bash ablocker-install.sh --fw nft --logfile /var/log/xray/access.log
 #   bash ablocker-install.sh --uninstall
 #
@@ -36,6 +38,9 @@ usage() { cat <<'H'
   --log-retention N       сколько архивов лога хранить      [ABLOCKER_LOG_RETENTION]
   --fw iptables|nft       фаервол                           [ABLOCKER_FW]
   --no-malware            выключить malware-блок            [ABLOCKER_MALWARE=0]
+  --fanout log|ban|off    детект шифрованных торрентов по   [ABLOCKER_FANOUT]
+                          поведению: log — только журнал,
+                          ban — банить, off — выключить
   --version vX.Y.Z        поставить конкретный релиз        [ABLOCKER_VERSION]
   --uninstall             удалить ablocker с ноды
 
@@ -52,6 +57,7 @@ LOGFILE="${ABLOCKER_LOGFILE:-}"
 LOG_RETENTION="${ABLOCKER_LOG_RETENTION:-}"
 FW="${ABLOCKER_FW:-}"
 MALWARE="${ABLOCKER_MALWARE:-}"
+FANOUT="${ABLOCKER_FANOUT:-}"
 VERSION="${ABLOCKER_VERSION:-}"
 UNINSTALL=0
 
@@ -64,6 +70,7 @@ while [ $# -gt 0 ]; do
     --log-retention)    LOG_RETENTION="${2:?--log-retention требует число архивов}"; shift ;;
     --fw)               FW="${2:?--fw требует iptables|nft}"; shift ;;
     --no-malware)       MALWARE=0 ;;
+    --fanout)           FANOUT="${2:?--fanout требует log|ban|off}"; shift ;;
     --version)          VERSION="${2:?--version требует тег, напр. v1.0.3}"; shift ;;
     --uninstall)        UNINSTALL=1 ;;
     -h|--help)          usage; exit 0 ;;
@@ -77,6 +84,7 @@ if [ -n "$DURATION" ];    then is_num "$DURATION"    || die "--duration: нуж�
 if [ -n "$MW_DURATION" ]; then is_num "$MW_DURATION" || die "--malware-duration: нужно число минут"; fi
 if [ -n "$LOG_RETENTION" ]; then is_num "$LOG_RETENTION" || die "--log-retention: нужно число архивов"; fi
 case "$FW" in ''|iptables|nft) ;; *) die "--fw: только iptables или nft" ;; esac
+case "$FANOUT" in ''|log|ban|off) ;; *) die "--fanout: только log, ban или off" ;; esac
 
 [ "$(id -u)" -eq 0 ] || die "Запусти от root (sudo)."
 
@@ -181,6 +189,22 @@ fi
 
 cfg_get() { sed -n "s/^$1:[[:space:]]*//p" "$INSTALL_DIR/config.yaml" | head -1 | sed 's/[[:space:]]*#.*//; s/^"//; s/"[[:space:]]*$//'; }
 cfg_set() { sed -i "s|^$1:.*|$1: $2|" "$INSTALL_DIR/config.yaml"; }
+# cfg_put — как cfg_set, но если ключа нет (конфиг старше фичи), дописывает его
+# в конец файла: cfg_set в этом случае молча ничего бы не сделал.
+cfg_put() {
+  if grep -q "^$1:" "$INSTALL_DIR/config.yaml"; then
+    cfg_set "$1" "$2"
+  else
+    # файл мог закончиться без перевода строки — не склеиваем с последней
+    [ -z "$(tail -c1 "$INSTALL_DIR/config.yaml")" ] || echo >> "$INSTALL_DIR/config.yaml"
+    printf '%s: %s\n' "$1" "$2" >> "$INSTALL_DIR/config.yaml"
+  fi
+}
+# текущий режим fan-out: off / log / ban (ключей нет = как в бинаре: log)
+fanout_mode() {
+  if [ "$(cfg_get FanoutEnabled)" = "false" ]; then echo off; return; fi
+  case "$(cfg_get FanoutAction)" in ban) echo ban ;; *) echo log ;; esac
+}
 
 # --- вопросы (если интерактивно и не -y) ---
 if [ "$YES" != 1 ] && [ -t 0 ]; then
@@ -215,6 +239,22 @@ if [ "$YES" != 1 ] && [ -t 0 ]; then
   CUR="$(cfg_get MalwareBlockEnabled)"
   read -rp "Блокировка malware/botnet? y/n [${CUR:-true}]: " a || true
   case "${a:-}" in y|Y) MALWARE=1 ;; n|N) MALWARE=0 ;; esac
+
+  echo "Детект шифрованных торрентов по поведению (сотни разных пиров за минуты;"
+  echo "тег TORRENT в Xray такие не видит). Сейчас: $(fanout_mode)"
+  echo "  1) log — только писать в журнал, кого поймал (первые сутки — проверить)"
+  echo "  2) ban — банить как за торрент"
+  echo "  3) off — выключить"
+  if [ "$FRESH" = 1 ]; then PROMPT="Выбор [1]: "; DEF="1"; else PROMPT="Выбор [Enter — не менять]: "; DEF=""; fi
+  read -rp "$PROMPT" a || true
+  a="${a:-$DEF}"
+  case "$a" in
+    1) FANOUT=log ;;
+    2) FANOUT=ban ;;
+    3) FANOUT=off ;;
+    "") ;;
+    *) red "  не понял — не меняю" ;;
+  esac
 
   CUR_LR=""
   if [ -f /etc/logrotate.d/remnanode ]; then
@@ -256,6 +296,18 @@ case "${MALWARE:-}" in
   1) cfg_set MalwareBlockEnabled true ;;
   0) cfg_set MalwareBlockEnabled false ;;
 esac
+if ! grep -qE '^Fanout(Enabled|Action):' "$INSTALL_DIR/config.yaml"; then
+  printf '\n# --- Детект шифрованных торрентов по поведению (fan-out), v1.0.9+: log | ban.\n#     Описание и остальные ключи — в config.yaml.default ---\n' >> "$INSTALL_DIR/config.yaml"
+fi
+case "${FANOUT:-}" in
+  log|ban) cfg_put FanoutEnabled true; cfg_put FanoutAction "\"$FANOUT\"" ;;
+  off)     cfg_put FanoutEnabled false ;;
+esac
+# конфиг старше v1.0.9 без ключей fan-out: дописываем их с теми же значениями,
+# что бинарь берёт по умолчанию (enabled, log) — поведение не меняется, зато
+# режим виден в файле и переключается одной sed-командой
+if ! grep -q '^FanoutEnabled:' "$INSTALL_DIR/config.yaml"; then cfg_put FanoutEnabled true; fi
+if ! grep -q '^FanoutAction:' "$INSTALL_DIR/config.yaml"; then cfg_put FanoutAction '"log"'; fi
 
 # --- хелперы: ablocker-bans (сводка) и ablocker-unban <IP> ---
 cat > /usr/local/bin/ablocker-bans <<'HLP1'
@@ -266,11 +318,16 @@ CFG="/opt/ablocker/config.yaml"
 J="/opt/ablocker/blocked_ips.json"
 st="$(systemctl is-active ablocker 2>/dev/null || true)"
 if [ "$st" = "active" ]; then printf "\033[32mablocker: active\033[0m\n"; else printf "\033[31mablocker: %s\033[0m\n" "${st:-не установлен}"; fi
-journalctl -u ablocker --no-pager 2>/dev/null | grep "Malware blocking enabled" | tail -1
-if [ -f "$CFG" ]; then grep -E '^(BlockDuration|MalwareBlockDuration|BlockMode):' "$CFG" | sed 's/[[:space:]]*#.*//; s/^/  /'; fi
-td="$(journalctl -u ablocker --since today --no-pager 2>/dev/null | grep -c '(torrent)' || true)"
-tm="$(journalctl -u ablocker --since today --no-pager 2>/dev/null | grep -c 'MALWARE hit' || true)"
-echo "  за сегодня: торрент-банов ${td:-0}, malware-хитов ${tm:-0}"
+journalctl -u ablocker --no-pager 2>/dev/null | grep -E "Malware blocking enabled|Fan-out torrent detection" | tail -2
+if [ -f "$CFG" ]; then grep -E '^(BlockDuration|MalwareBlockDuration|BlockMode|FanoutEnabled|FanoutAction|FanoutThreshold|FanoutWindow):' "$CFG" | sed 's/[[:space:]]*#.*//; s/^/  /'; fi
+JT="$(journalctl -u ablocker --since today --no-pager 2>/dev/null || true)"
+cnt() { printf '%s\n' "$JT" | grep -c -- "$1" || true; }
+td="$(cnt '(torrent)')"; tf="$(cnt '\[fanout:')"; tl="$(cnt 'FANOUT: ')"; tm="$(cnt 'MALWARE hit')"
+echo "  за сегодня: торрент-банов ${td:-0} (из них по поведению ${tf:-0}), fan-out без бана ${tl:-0}, malware-хитов ${tm:-0}"
+if [ "${tl:-0}" != 0 ]; then
+  echo "  последние fan-out детекты без бана (режим log / IP в белом списке):"
+  printf '%s\n' "$JT" | grep 'FANOUT: ' | tail -10 | sed 's/^.*FANOUT: /    /'
+fi
 echo
 if [ ! -s "$J" ]; then echo "Активных банов нет (файл $J пуст или отсутствует)."; exit 0; fi
 if command -v jq >/dev/null 2>&1; then
@@ -293,35 +350,42 @@ chmod 0755 /usr/local/bin/ablocker-bans
 
 cat > /usr/local/bin/ablocker-unban <<'HLP2'
 #!/usr/bin/env bash
-# ablocker-unban <IP> — полностью снять бан: из blocked_ips.json (иначе бан
-# восстановится при рестарте), из фаервола, затем перезапустить сервис.
+# ablocker-unban <IP> [IP ...] — полностью снять бан: из blocked_ips.json (иначе
+# бан восстановится при рестарте), из фаервола. Сервис перезапускается ОДИН раз
+# на весь список (раньше — на каждый IP, и пачка разбанов упиралась в
+# start-limit-hit systemd).
 set -uo pipefail
-IP="${1:-}"
-if [ -z "$IP" ]; then echo "Использование: ablocker-unban <IP>"; exit 1; fi
+if [ $# -eq 0 ]; then echo "Использование: ablocker-unban <IP> [IP ...]"; exit 1; fi
 J="/opt/ablocker/blocked_ips.json"
 systemctl stop ablocker 2>/dev/null || true
 if [ -s "$J" ]; then
   if command -v jq >/dev/null 2>&1; then
-    tmp="$(mktemp)"; jq --arg ip "$IP" 'del(.[$ip])' "$J" > "$tmp" && mv "$tmp" "$J"
+    for IP in "$@"; do
+      tmp="$(mktemp)"; jq --arg ip "$IP" 'del(.[$ip])' "$J" > "$tmp" && mv "$tmp" "$J"
+    done
   elif command -v python3 >/dev/null 2>&1; then
-    python3 - "$IP" "$J" <<'PY'
+    python3 - "$J" "$@" <<'PY'
 import json, sys
-ip, path = sys.argv[1], sys.argv[2]
+path, ips = sys.argv[1], sys.argv[2:]
 d = json.load(open(path))
-d.pop(ip, None)
+for ip in ips:
+    d.pop(ip, None)
 json.dump(d, open(path, "w"), indent=2)
 PY
   else
-    echo "Нет ни jq, ни python3 — удали \"$IP\" из $J вручную, иначе бан вернётся после рестарта."
+    echo "Нет ни jq, ни python3 — удали эти IP из $J вручную, иначе бан вернётся после рестарта."
   fi
 fi
-iptables -t raw -D ABLOCKER_BLOCKED -s "$IP" -j DROP 2>/dev/null || true
-nft delete element inet ablocker ABLOCKER_BLOCKED_IPS "{ $IP }" 2>/dev/null || true
+for IP in "$@"; do
+  iptables -t raw -D ABLOCKER_BLOCKED -s "$IP" -j DROP 2>/dev/null || true
+  nft delete element inet ablocker ABLOCKER_BLOCKED_IPS "{ $IP }" 2>/dev/null || true
+  echo "Разбанен: $IP"
+done
+systemctl reset-failed ablocker 2>/dev/null || true
 systemctl start ablocker 2>/dev/null || true
-echo "Разбанен: $IP"
 HLP2
 chmod 0755 /usr/local/bin/ablocker-unban
-green "Хелперы: ablocker-bans (сводка), ablocker-unban <IP> (разбан)."
+green "Хелперы: ablocker-bans (сводка), ablocker-unban <IP> [IP ...] (разбан)."
 
 # --- logrotate + systemd-таймер (cron не нужен) ---
 LOGPATH="$(cfg_get LogFile)"
@@ -387,6 +451,9 @@ Description=ablocker - Xray abuse blocker (torrents + malware/botnet)
 Documentation=https://github.com/$GH_REPO
 After=network-online.target
 Wants=network-online.target
+# без лимита перезапусков: иначе пачка рестартов (разбаны, ожидание access.log)
+# вешает сервис в start-limit-hit и он не поднимается сам
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -413,7 +480,14 @@ sleep 2
 if systemctl is-active --quiet ablocker; then
   green "Готово — ablocker работает."
   journalctl -u ablocker -n 50 --no-pager | grep -m1 "Malware blocking enabled" || true
+  journalctl -u ablocker -n 50 --no-pager | grep -m1 "Fan-out torrent detection" || true
   blue "Конфиг: BlockDuration=$(cfg_get BlockDuration) мин, MalwareBlockDuration=$(cfg_get MalwareBlockDuration) мин, BlockMode=$(cfg_get BlockMode)"
+  case "$(fanout_mode)" in
+    log) blue "Fan-out: режим log — только журнал. Через сутки проверь: journalctl -u ablocker --since -24h | grep FANOUT"
+         blue "         ложняков нет — включи бан: sed -i 's/^FanoutAction:.*/FanoutAction: \"ban\"/' $INSTALL_DIR/config.yaml && systemctl restart ablocker" ;;
+    ban) blue "Fan-out: режим ban — шифрованный торрент банится как обычный." ;;
+    off) blue "Fan-out: выключен (включить: bash ablocker-install.sh -y --fanout log)" ;;
+  esac
   blue "Логи ноды: хранить $(sed -n 's/^[[:space:]]*rotate[[:space:]]\+//p' /etc/logrotate.d/remnanode 2>/dev/null | head -1 || true) архивов, ротация при 100M"
   blue "Сводка банов: ablocker-bans    Разбан: ablocker-unban <IP>"
   blue "Логи:   journalctl -u ablocker -f"

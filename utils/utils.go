@@ -13,6 +13,7 @@ import (
 
 	"ablocker/blocklist"
 	"ablocker/config"
+	"ablocker/fanout"
 	"ablocker/firewall"
 	"ablocker/storage"
 
@@ -22,6 +23,7 @@ import (
 var ipStorage *storage.IPStorage
 var firewallManager *firewall.Manager
 var malwareMatcher *blocklist.Matcher
+var fanoutDetector *fanout.Detector
 
 var (
 	parseStats struct {
@@ -34,11 +36,13 @@ var (
 	metricsStartTime time.Time
 )
 
+// Fixed markers of Xray's access.log format are initialised statically, so the
+// parsers work regardless of setup order; only the torrent tag comes from config.
 var (
 	torrentTagBytes []byte
-	fromBytes       []byte
-	emailBytes      []byte
-	acceptedBytes   []byte
+	fromBytes       = []byte("from ")
+	emailBytes      = []byte("email: ")
+	acceptedBytes   = []byte("accepted ")
 )
 
 func init() {
@@ -47,9 +51,6 @@ func init() {
 
 func initializeByteSearchPatterns() {
 	torrentTagBytes = []byte(config.TorrentTag)
-	fromBytes = []byte("from ")
-	emailBytes = []byte("email: ")
-	acceptedBytes = []byte("accepted ")
 
 	log.Printf("Initialized byte search patterns: TorrentTag='%s' (%d bytes)",
 		config.TorrentTag, len(torrentTagBytes))
@@ -83,13 +84,75 @@ func StartLogMonitor() {
 			continue
 		}
 
+		if malwareMatcher == nil && fanoutDetector == nil {
+			continue
+		}
+		dst, dstPort := parseDest(line.Text)
+		if dst == "" {
+			continue
+		}
+
 		if malwareMatcher != nil {
-			if dst := parseDestHost(line.Text); dst != "" {
-				if cat, hit := malwareMatcher.Match(dst); hit {
-					handleMalwareEntry(line.Text, dst, string(cat))
-				}
+			if cat, hit := malwareMatcher.Match(dst); hit {
+				handleMalwareEntry(line.Text, dst, string(cat))
+				continue
 			}
 		}
+
+		if fanoutDetector != nil {
+			handleFanout(line.Text, dst, dstPort)
+		}
+	}
+}
+
+// handleFanout feeds one outbound connection to the behavioural torrent
+// detector and acts when a user crosses the fan-out threshold. It catches
+// encrypted BitTorrent that protocol sniffing and signatures cannot see.
+func handleFanout(line, dst string, dstPort int) {
+	if !fanoutDetector.Relevant(dst, dstPort) { // cheap pre-filter: ~all lines stop here
+		return
+	}
+	ip, user := parseIPAndUser(line)
+	if ip == "" && user == "" {
+		return
+	}
+	key := user
+	if key == "" || key == config.DefaultNoEmailUsername {
+		key = "ip:" + ip
+	}
+
+	fired, peers := fanoutDetector.Observe(key, ip, dst, dstPort)
+	if !fired {
+		return
+	}
+
+	bypassed := ip != "" && IsBypassedIP(ip)
+	if config.FanoutAction == "ban" && ip != "" && !bypassed && !ipStorage.IsBlocked(ip) {
+		if err := ipStorage.AddBlockedIP(ip, user, time.Duration(config.BlockDuration)*time.Minute); err != nil {
+			log.Printf("Error saving blocked IP to storage: %v", err)
+		}
+		go BlockIP(ip)
+		log.Printf("User %s with IP: %s blocked for %d minutes (torrent) [fanout: %d peers in %s]",
+			user, ip, config.BlockDuration, peers, config.FanoutWindow)
+		if config.SendWebhook {
+			go SendWebhook(user, ip, "fanout_block")
+		}
+		return
+	}
+
+	note := ""
+	switch {
+	case bypassed:
+		note = " (IP в BypassIPS — не баню)"
+	case config.FanoutAction == "ban" && ip != "" && ipStorage.IsBlocked(ip):
+		note = " (IP уже в бане)"
+	}
+	log.Printf("FANOUT: user=%s ip=%s peers=%d window=%s action=%s%s",
+		user, ip, peers, config.FanoutWindow, config.FanoutAction, note)
+	// No ban happened (log mode, or a whitelisted IP in ban mode): still tell
+	// the panel, so it can act on the account itself.
+	if config.SendWebhook && (config.FanoutAction == "log" || bypassed) {
+		go SendWebhook(user, ip, "fanout_detect")
 	}
 }
 
@@ -168,9 +231,21 @@ func parseLogEntryFast(line string) (ip, username string, valid bool) {
 //	... accepted udp:185.10.10.10:443 [..]  -> "185.10.10.10"
 //	... accepted tcp:[2a00::1]:443 [..]     -> "2a00::1"
 func parseDestHost(line string) string {
+	host, _ := parseDest(line)
+	return host
+}
+
+// parseDest extracts destination host and port from a log line:
+//
+//	... accepted tcp:sub.evil.com:443 [..]  -> "sub.evil.com", 443
+//	... accepted udp:185.10.10.10:6881 [..] -> "185.10.10.10", 6881
+//	... accepted tcp:[2a00::1]:443 [..]     -> "2a00::1", 443
+//
+// port is 0 when absent or malformed.
+func parseDest(line string) (host string, port int) {
 	idx := indexBytes(stringToBytes(line), acceptedBytes)
 	if idx == -1 {
-		return ""
+		return "", 0
 	}
 	p := idx + len(acceptedBytes)
 	if p+4 <= len(line) &&
@@ -179,23 +254,35 @@ func parseDestHost(line string) string {
 		p += 4
 	}
 	if p >= len(line) {
-		return ""
+		return "", 0
 	}
+	var end int
 	if line[p] == '[' { // IPv6 literal
-		end := p + 1
+		end = p + 1
 		for end < len(line) && line[end] != ']' {
 			end++
 		}
-		if end < len(line) {
-			return line[p+1 : end]
+		if end >= len(line) {
+			return "", 0
 		}
-		return ""
+		host = line[p+1 : end]
+		end++ // past ']'
+	} else {
+		end = p
+		for end < len(line) && line[end] != ':' && line[end] != ' ' {
+			end++
+		}
+		host = line[p:end]
 	}
-	end := p
-	for end < len(line) && line[end] != ':' && line[end] != ' ' {
-		end++
+	if end < len(line) && line[end] == ':' {
+		for i := end + 1; i < len(line) && line[i] >= '0' && line[i] <= '9'; i++ {
+			port = port*10 + int(line[i]-'0')
+			if port > 65535 {
+				return host, 0
+			}
+		}
 	}
-	return line[p:end]
+	return host, port
 }
 
 // parseIPAndUser pulls source IP and username from a line, regardless of tag.
@@ -334,6 +421,10 @@ func SetIPStorage(storage *storage.IPStorage) {
 // SetMalwareMatcher wires the blocklist matcher used for malware/botnet detection.
 func SetMalwareMatcher(m *blocklist.Matcher) {
 	malwareMatcher = m
+}
+
+func SetFanoutDetector(d *fanout.Detector) {
+	fanoutDetector = d
 }
 
 func UpdateBlockedIPs() {

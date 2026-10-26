@@ -3,6 +3,7 @@ Description=ablocker - Xray abuse blocker (torrents + malware/botnet)
 Documentation=https://github.com/TeeqzyRU/ablocker
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
