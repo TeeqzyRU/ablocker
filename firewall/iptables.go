@@ -107,17 +107,18 @@ func (f *IPTablesFirewall) BlockIP(ip string) error {
 		}
 	}
 
-	rules, err := f.ipt.List("raw", f.chainName)
+	// Exact check (iptables -C). A substring search over the listed rules
+	// treated 95.46.197.5 as "already blocked" whenever 95.46.197.50 or
+	// 195.46.197.5 was, so with thousands of bans many new bans silently
+	// never reached the firewall.
+	exists, err := f.ipt.Exists("raw", f.chainName, "-s", ip, "-j", "DROP")
 	if err != nil {
-		log.Printf("Error getting rules from chain %s: %v", f.chainName, err)
+		log.Printf("Error checking rule for IP %s in chain %s: %v", ip, f.chainName, err)
 		return err
 	}
-
-	for _, rule := range rules {
-		if strings.Contains(rule, ip) && strings.Contains(rule, "DROP") {
-			log.Printf("IP %s is already blocked in chain %s", ip, f.chainName)
-			return nil
-		}
+	if exists {
+		log.Printf("IP %s is already blocked in chain %s", ip, f.chainName)
+		return nil
 	}
 
 	err = f.ipt.Append("raw", f.chainName, "-s", ip, "-j", "DROP")

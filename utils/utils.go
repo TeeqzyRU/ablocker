@@ -449,10 +449,15 @@ func UpdateBlockedIPs() {
 	}
 }
 
+// blockedIPsResyncEvery is how often bans from storage are re-checked against
+// the firewall. It used to be BlockDuration (30 days on most nodes), so a ban
+// that went missing from the firewall stayed missing for a month.
+const blockedIPsResyncEvery = 5 * time.Minute
+
 func ScheduleBlockedIPsUpdate() {
 	UpdateBlockedIPs()
 	go func() {
-		for range time.Tick(time.Duration(config.BlockDuration) * time.Minute) {
+		for range time.Tick(blockedIPsResyncEvery) {
 			UpdateBlockedIPs()
 		}
 	}()
